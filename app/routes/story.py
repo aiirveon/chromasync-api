@@ -1,3 +1,5 @@
+#C:\Users\DELL\Documents\AI_PM_Projects\chromasync\chromasync-api\app\routes\story.py
+
 import os
 import json
 import anthropic
