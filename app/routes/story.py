@@ -214,6 +214,20 @@ class BeatResponse(BaseModel):
     hint: str
     emotional_note: str
 
+class BeatSuggestionRequest(BaseModel):
+    beat_number: int
+    beat_name: str
+    format: str
+    framework: str = "save_the_cat"
+    logline: str
+    character_lie: str
+    character_want: str
+    character_need: str
+    completed_beats: list[dict] = []
+
+class BeatSuggestionResponse(BaseModel):
+    suggestions: list[str]
+
 
 # ─── /interrogation-hints ─────────────────────────────────────────────────────
 
@@ -526,5 +540,64 @@ Respond ONLY with valid JSON, no markdown:
             if text.startswith("json"):
                 text = text[4:]
         return BeatResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
+# ─── /beat-suggestion ────────────────────────────────────────────────────────
+
+@router.post("/beat-suggestion", response_model=BeatSuggestionResponse)
+async def generate_beat_suggestions(req: BeatSuggestionRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    beat_list = get_beats(req.format, req.framework)
+    total = len(beat_list)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    completed_summary = ""
+    if req.completed_beats:
+        lines = [f"Beat {b['number']} ({b['name']}): {b['answer']}" for b in req.completed_beats]
+        completed_summary = "\nBeats already completed:\n" + "\n".join(lines)
+
+    prompt = f"""You are a story structure expert working within this framework:
+{framework_ctx}
+
+The writer is working on beat {req.beat_number} of {total}: "{req.beat_name}"
+
+Story context:
+- Logline: "{req.logline}"
+- The Lie the protagonist believes: "{req.character_lie}"
+- What they Want: "{req.character_want}"
+- What they Need: "{req.character_need}"{completed_summary}
+
+{AVOID_LIST}
+
+Generate 3 SHORT, SPECIFIC beat answer suggestions for this beat.
+Each suggestion should be:
+- 1-2 sentences max — a concrete story moment, not a description
+- Grounded in THIS specific story's characters, setting, and stakes
+- Different from each other in approach or tone
+- Written as if the writer wrote it themselves — first draft energy, not polished
+- Specific enough to be surprising, not generic enough to fit any story
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["suggestion 1", "suggestion 2", "suggestion 3"]}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return BeatSuggestionResponse(**json.loads(text.strip()))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
