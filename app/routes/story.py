@@ -1,5 +1,3 @@
-#C:\Users\DELL\Documents\AI_PM_Projects\chromasync\chromasync-api\app\routes\story.py
-
 import os
 import json
 import anthropic
@@ -8,11 +6,143 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
+# ─── Option 4: Negative constraints ──────────────────────────────────────────
+# Injected silently into every generation prompt.
+# Forces the model off its most common defaults.
+
+AVOID_LIST = """
+CRITICAL — AVOID ALL OF THE FOLLOWING. These are the most overused AI story defaults:
+
+OVERUSED CHARACTER WOUNDS (never use these as the central wound):
+- Absent or dead parent as the defining trauma
+- Childhood abandonment or orphan backstory  
+- Survivor's guilt from a death the protagonist caused or witnessed
+- Estranged sibling or family member who needs reconciling
+- Workaholic who neglected their family and must learn balance
+- Soldier/first responder haunted by one specific incident
+- Gifted person who was told they'd never amount to anything
+
+OVERUSED STORY STRUCTURES (never default to these):
+- Chosen one who must accept their destiny
+- Underdog who wins the big competition through heart not talent
+- Loner who learns to trust and love again through one transformative relationship
+- City person who moves to small town and discovers what really matters
+- Person who gets everything they thought they wanted and discovers it's hollow
+
+OVERUSED RESOLUTION SHAPES (never end this way by default):
+- The protagonist gives a speech that changes everything
+- A misunderstanding is resolved through honest conversation at the last moment
+- The protagonist sacrifices themselves and is rewarded for it
+
+Instead: find the specific, surprising, human truth inside THIS writer's idea.
+"""
+
+# ─── Option 2: Framework beat lists ──────────────────────────────────────────
+
+SAVE_THE_CAT_BEATS = [
+    {"number": 1,  "name": "Opening Image",          "description": "A single image capturing the hero's world before the adventure begins."},
+    {"number": 2,  "name": "Theme Stated",            "description": "Someone states the theme — the lesson the hero must learn."},
+    {"number": 3,  "name": "Set-Up",                  "description": "The world, the problem, the hero's flaw and potential for change."},
+    {"number": 4,  "name": "Catalyst",                "description": "The inciting incident that upends the hero's world and forces a choice."},
+    {"number": 5,  "name": "Debate",                  "description": "The hero resists the call. Fear holds them back."},
+    {"number": 6,  "name": "Break into Two",          "description": "The hero makes an active choice and steps into the upside-down world."},
+    {"number": 7,  "name": "B Story",                 "description": "A new relationship arrives to carry the theme."},
+    {"number": 8,  "name": "Fun and Games",           "description": "The promise of the premise. The hero tries to get what they want."},
+    {"number": 9,  "name": "Midpoint",                "description": "A false victory or false defeat that raises the stakes."},
+    {"number": 10, "name": "Bad Guys Close In",       "description": "External pressure and internal doubt conspire."},
+    {"number": 11, "name": "All Is Lost",             "description": "The lowest point. The hero loses everything."},
+    {"number": 12, "name": "Dark Night of the Soul",  "description": "The hero wallows. Then — a breakthrough from within."},
+    {"number": 13, "name": "Break into Three",        "description": "Armed with new insight, the hero acts."},
+    {"number": 14, "name": "Finale",                  "description": "The hero storms the castle and proves the theme."},
+    {"number": 15, "name": "Final Image",             "description": "A mirror of the Opening Image showing how the world has changed."},
+]
+
+TRUBY_BEATS = [
+    {"number": 1,  "name": "Self-Revelation Need & Ghost", "description": "The hero's deep psychological or moral need, and the ghost — the defining past event — that caused it."},
+    {"number": 2,  "name": "Problem & Desire",             "description": "The external problem gives the hero a concrete goal. Desire is what they consciously want."},
+    {"number": 3,  "name": "Opponent",                     "description": "The opponent is not a villain — they want the same thing and expose the hero's weakness."},
+    {"number": 4,  "name": "Plan",                         "description": "The hero's strategy for overcoming the opponent and reaching the goal."},
+    {"number": 5,  "name": "Opening Weakness & Need",      "description": "The specific flaw or blindspot the hero carries into the story — moral and psychological."},
+    {"number": 6,  "name": "Inciting Event",               "description": "The external event that forces the hero into conflict with the opponent."},
+    {"number": 7,  "name": "Desire Established",           "description": "The hero's goal becomes clear and urgent — the audience knows what they're fighting for."},
+    {"number": 8,  "name": "Ally & Relationship",          "description": "The ally who helps the hero — and the relationship that will be tested by the moral argument."},
+    {"number": 9,  "name": "Moral Argument Begins",        "description": "The story's central moral debate starts — the opponent challenges the hero's worldview."},
+    {"number": 10, "name": "First Revelation & Decision",  "description": "The hero learns something that forces a new decision — and reveals a character flaw."},
+    {"number": 11, "name": "Gate, Gauntlet & Visit",       "description": "The hero faces a sequence of increasingly difficult challenges that test their plan."},
+    {"number": 12, "name": "Second Revelation & Decision", "description": "A deeper truth emerges — the hero is forced to change tactics and confront their moral weakness."},
+    {"number": 13, "name": "Apparent Defeat",              "description": "The hero appears to have lost everything — the opponent has won."},
+    {"number": 14, "name": "Third Revelation & Decision",  "description": "The hero sees the full truth about themselves and makes a final moral decision."},
+    {"number": 15, "name": "Moral Self-Revelation",        "description": "The hero understands the true nature of their weakness and what they must change."},
+    {"number": 16, "name": "Climax",                       "description": "The hero confronts the opponent using their new moral understanding."},
+    {"number": 17, "name": "Moral Decision at Climax",     "description": "The hero must choose between their old self and their new understanding — with consequences."},
+    {"number": 18, "name": "New Equilibrium",              "description": "The world after the conflict — changed by the hero's moral decision."},
+]
+
+STORY_CIRCLE_BEATS = [
+    {"number": 1, "name": "You",           "description": "Establish the protagonist in their zone of comfort — who they are and what their world looks like."},
+    {"number": 2, "name": "Need",          "description": "The protagonist wants or needs something — a lack or desire that disrupts their comfort."},
+    {"number": 3, "name": "Go",            "description": "The protagonist enters an unfamiliar situation — crosses into an unknown world."},
+    {"number": 4, "name": "Search",        "description": "The protagonist adapts to the new world and searches for what they need — encountering obstacles."},
+    {"number": 5, "name": "Find",          "description": "The protagonist gets what they thought they wanted — but it costs something."},
+    {"number": 6, "name": "Take",          "description": "The protagonist pays the price — there is a heavy cost for what they found."},
+    {"number": 7, "name": "Return",        "description": "The protagonist returns to where they began — but changed by the journey."},
+    {"number": 8, "name": "Change",        "description": "The protagonist has fundamentally changed — the world is the same but they are not."},
+]
+
+SHORT_BEATS = [
+    {"number": 1, "name": "Inciting Moment", "description": "The disruption that breaks the protagonist's equilibrium."},
+    {"number": 2, "name": "Rising Pressure", "description": "Tension compounds. The protagonist tries and fails."},
+    {"number": 3, "name": "Crisis Point",    "description": "The moment of no return — a choice must be made."},
+    {"number": 4, "name": "Climax",          "description": "The protagonist acts from their deepest truth."},
+    {"number": 5, "name": "Resonance",       "description": "The final image that carries the emotional aftershock."},
+]
+
+# Keep legacy name for backward compatibility
+FILM_BEATS = SAVE_THE_CAT_BEATS
+
+def get_beats(format: str, framework: str) -> list:
+    if format == "short_story":
+        return SHORT_BEATS
+    if framework == "truby":
+        return TRUBY_BEATS
+    if framework == "story_circle":
+        return STORY_CIRCLE_BEATS
+    return SAVE_THE_CAT_BEATS
+
+def get_framework_context(framework: str, format: str) -> str:
+    if format == "short_story":
+        return "This is a SHORT STORY (1,000–5,000 words). Use literary fiction language and intimate character focus."
+    if framework == "truby":
+        return """This story uses JOHN TRUBY'S MORAL ARGUMENT framework.
+Key principles:
+- Every protagonist has a ghost (defining past event) AND a weakness that causes moral failure — they are hurting someone else, not just themselves
+- The story is a moral argument: the opponent challenges the hero's worldview and exposes their moral weakness
+- The self-revelation must be moral AND psychological — the hero must change how they treat others, not just how they feel
+- Avoid redemption arcs that resolve neatly. Truby stories are morally complex and sometimes end in failure."""
+    if framework == "story_circle":
+        return """This story uses DAN HARMON'S STORY CIRCLE framework.
+Key principles:
+- The structure is cyclical — the protagonist ends where they began but fundamentally changed
+- The 'need' is unconscious — the protagonist doesn't know what they truly need until they've paid the price for what they wanted
+- The 'cost' (step 6) must be real and painful — not symbolic
+- The 'change' (step 8) must be visible in behaviour, not just attitude
+- Works best for contained, intimate stories. Think Fleabag, Russian Doll, short films."""
+    return """This story uses BLAKE SNYDER'S SAVE THE CAT beat sheet.
+Key principles:
+- The logline must have an ironic premise
+- The protagonist must be active — they make choices, not receive them
+- The theme is stated early and proved at the finale
+- Every beat must connect to the protagonist's internal flaw"""
+
 # ─── Request / Response models ────────────────────────────────────────────────
 
 class LoglineRequest(BaseModel):
     raw_idea: str
-    format: str  # "film" or "short_story"
+    format: str
+    framework: str = "save_the_cat"
+    location: str = ""
+    broken_relationship: str = ""
+    private_behaviour: str = ""
 
 class LoglineVersion(BaseModel):
     label: str
@@ -23,9 +153,36 @@ class LoglineResponse(BaseModel):
     versions: list[LoglineVersion]
     primal_question: str
 
+class LoglineSingleRequest(BaseModel):
+    raw_idea: str
+    format: str
+    framework: str = "save_the_cat"
+    label: str
+    location: str = ""
+    broken_relationship: str = ""
+    private_behaviour: str = ""
+    existing_loglines: list[str] = []
+
+class LoglineSingleResponse(BaseModel):
+    label: str
+    logline: str
+    angle: str
+
+class InterrogationHintRequest(BaseModel):
+    question_number: int  # 1, 2, or 3
+    raw_idea: str
+    format: str
+    framework: str = "save_the_cat"
+    location: str = ""
+    broken_relationship: str = ""
+
+class InterrogationHintResponse(BaseModel):
+    suggestions: list[str]
+
 class CharacterRequest(BaseModel):
     logline: str
     format: str
+    framework: str = "save_the_cat"
     wound_answer: str
     character_name: str | None = None
 
@@ -45,6 +202,7 @@ class BeatRequest(BaseModel):
     beat_number: int
     beat_name: str
     format: str
+    framework: str = "save_the_cat"
     logline: str
     character_lie: str
     character_want: str
@@ -56,6 +214,81 @@ class BeatResponse(BaseModel):
     hint: str
     emotional_note: str
 
+
+# ─── /interrogation-hints ─────────────────────────────────────────────────────
+
+@router.post("/interrogation-hints", response_model=InterrogationHintResponse)
+async def generate_interrogation_hints(req: InterrogationHintRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    if req.question_number == 1:
+        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+Framework: {framework_ctx}
+
+Generate 3 SPECIFIC, SURPRISING location suggestions for where this story could be set.
+NOT generic cities or countries. Think: a specific type of building, institution, neighbourhood, or environment.
+Each suggestion should feel like it adds texture and possibility to this specific idea.
+Each suggestion: under 12 words. Vivid and concrete.
+
+{AVOID_LIST}
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["location 1", "location 2", "location 3"]}}"""
+
+    elif req.question_number == 2:
+        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+The story is set: "{req.location}"
+Framework: {framework_ctx}
+
+Generate 3 SPECIFIC broken relationship suggestions that existed BEFORE this story begins.
+Not a plot point — something that already happened. Something that left a mark.
+Each suggestion must feel specific to both the idea and the location. Avoid parent/child estrangement as default.
+Each suggestion: one sentence, under 20 words.
+
+{AVOID_LIST}
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["relationship 1", "relationship 2", "relationship 3"]}}"""
+
+    else:
+        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+The story is set: "{req.location}"
+Broken relationship before the story: "{req.broken_relationship}"
+Framework: {framework_ctx}
+
+Generate 3 SPECIFIC private behaviour suggestions — small things the protagonist does when no one is watching.
+This reveals who they truly are beneath the surface. Not dramatic. Small, human, specific.
+Must feel consistent with the setting and broken relationship provided.
+Each suggestion: one sentence, under 15 words.
+
+{AVOID_LIST}
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["behaviour 1", "behaviour 2", "behaviour 3"]}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return InterrogationHintResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
 # ─── /logline ─────────────────────────────────────────────────────────────────
 
 @router.post("/logline", response_model=LoglineResponse)
@@ -65,36 +298,44 @@ async def generate_loglines(req: LoglineRequest):
         raise HTTPException(status_code=500, detail="AI not configured")
 
     client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
 
-    format_context = (
-        "This is a FILM. Use cinematic language appropriate for a screenplay pitch."
-        if req.format == "film"
-        else "This is a SHORT STORY (1,000-5,000 words). Use literary fiction language."
-    )
+    specificity = ""
+    if req.location:
+        specificity += f"\nSetting: {req.location}"
+    if req.broken_relationship:
+        specificity += f"\nBroken relationship before the story: {req.broken_relationship}"
+    if req.private_behaviour:
+        specificity += f"\nThe protagonist when no one is watching: {req.private_behaviour}"
 
-    prompt = f"""You are a story development expert trained in Blake Snyder's Save the Cat logline principles, Jeff Lyons' Premise Line framework, and Robert McKee's story theory.
+    prompt = f"""You are a story development expert working within this framework:
+{framework_ctx}
 
-{format_context}
+A writer has this raw idea: "{req.raw_idea}"
+{specificity}
 
-A writer has given you their raw story idea:
-\"{req.raw_idea}\"
+{AVOID_LIST}
 
-Return THREE logline versions, each emphasising a different angle. Each logline must:
-- Contain an ironic or compelling premise
-- Name or imply the protagonist
+Generate THREE logline versions, each emphasising a different angle.
+Use the specificity details above — the setting, broken relationship, and behaviour — to make each logline concrete and grounded in THIS writer's world, not a generic version of their idea.
+
+Each logline must:
+- Contain an ironic or surprising premise
+- Name or strongly imply the protagonist
 - State a clear goal and clear stakes
 - Be one sentence, under 40 words
+- Feel like it could only be THIS story — not any story
 
-Then ask the single most important Primal Question to find the deeper emotional truth.
+Then ask the single most important Primal Question — the deeper emotional truth beneath the idea.
 
 Respond ONLY with valid JSON, no markdown:
 {{
   "versions": [
-    {{"label": "External Stakes", "logline": "logline focused on external plot danger", "angle": "one sentence on what this emphasises"}},
-    {{"label": "Internal Stakes", "logline": "logline focused on internal emotional journey", "angle": "one sentence on what this emphasises"}},
-    {{"label": "Tonal Shift", "logline": "logline reframing from unexpected tonal angle", "angle": "one sentence on what this emphasises"}}
+    {{"label": "External Stakes", "logline": "logline focused on external plot tension", "angle": "one sentence on what this angle emphasises"}},
+    {{"label": "Internal Stakes", "logline": "logline focused on internal emotional journey", "angle": "one sentence on what this angle emphasises"}},
+    {{"label": "Tonal Shift", "logline": "logline reframing from unexpected angle", "angle": "one sentence on what this angle emphasises"}}
   ],
-  "primal_question": "a single deep question about what the protagonist desperately wants at their most human level — specific to this story"
+  "primal_question": "a single deep question specific to this story and its protagonist"
 }}"""
 
     message = client.messages.create(
@@ -114,36 +355,120 @@ Respond ONLY with valid JSON, no markdown:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
 
-# ─── Beat definitions ────────────────────────────────────────────────────────────────
+# ─── /logline-single ──────────────────────────────────────────────────────────
 
-FILM_BEATS = [
-    {"number": 1,  "name": "Opening Image",         "description": "A single image capturing the hero's world before the adventure begins."},
-    {"number": 2,  "name": "Theme Stated",           "description": "Someone states the theme — the lesson the hero must learn."},
-    {"number": 3,  "name": "Set-Up",                 "description": "The world, the problem, the hero's flaw and potential for change."},
-    {"number": 4,  "name": "Catalyst",               "description": "The inciting incident that upends the hero's world and forces a choice."},
-    {"number": 5,  "name": "Debate",                 "description": "The hero resists the call. Fear holds them back."},
-    {"number": 6,  "name": "Break into Two",         "description": "The hero makes an active choice and steps into the upside-down world."},
-    {"number": 7,  "name": "B Story",                "description": "A new relationship arrives to carry the theme."},
-    {"number": 8,  "name": "Fun and Games",          "description": "The promise of the premise. The hero tries to get what they want."},
-    {"number": 9,  "name": "Midpoint",               "description": "A false victory or false defeat that raises the stakes."},
-    {"number": 10, "name": "Bad Guys Close In",      "description": "External pressure and internal doubt conspire."},
-    {"number": 11, "name": "All Is Lost",            "description": "The lowest point. The hero loses everything."},
-    {"number": 12, "name": "Dark Night of the Soul",  "description": "The hero wallows. Then — a breakthrough from within."},
-    {"number": 13, "name": "Break into Three",       "description": "Armed with new insight, the hero acts."},
-    {"number": 14, "name": "Finale",                 "description": "The hero storms the castle and proves the theme."},
-    {"number": 15, "name": "Final Image",            "description": "A mirror of the Opening Image showing how the world has changed."},
-]
+@router.post("/logline-single", response_model=LoglineSingleResponse)
+async def regenerate_single_logline(req: LoglineSingleRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
 
-SHORT_BEATS = [
-    {"number": 1, "name": "Inciting Moment", "description": "The disruption that breaks the protagonist's equilibrium."},
-    {"number": 2, "name": "Rising Pressure", "description": "Tension compounds. The protagonist tries and fails."},
-    {"number": 3, "name": "Crisis Point",    "description": "The moment of no return — a choice must be made."},
-    {"number": 4, "name": "Climax",          "description": "The protagonist acts from their deepest truth."},
-    {"number": 5, "name": "Resonance",       "description": "The final image that carries the emotional aftershock."},
-]
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    specificity = ""
+    if req.location:
+        specificity += f"\nSetting: {req.location}"
+    if req.broken_relationship:
+        specificity += f"\nBroken relationship: {req.broken_relationship}"
+    if req.private_behaviour:
+        specificity += f"\nProtagonist privately: {req.private_behaviour}"
+
+    existing = ""
+    if req.existing_loglines:
+        existing = "\nDo NOT produce anything similar to these existing versions:\n" + "\n".join(f"- {l}" for l in req.existing_loglines)
+
+    prompt = f"""You are a story development expert working within this framework:
+{framework_ctx}
+
+Raw idea: "{req.raw_idea}"
+{specificity}
+{existing}
+
+{AVOID_LIST}
+
+Generate ONE new logline for the "{req.label}" angle.
+It must be completely different from any existing versions listed above.
+Under 40 words. Concrete, specific, surprising.
+
+Respond ONLY with valid JSON, no markdown:
+{{"label": "{req.label}", "logline": "the logline", "angle": "one sentence on what this emphasises"}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return LoglineSingleResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
 
-# ─── /beat ───────────────────────────────────────────────────────────────────
+# ─── /character ───────────────────────────────────────────────────────────────
+
+@router.post("/character", response_model=CharacterResponse)
+async def generate_character(req: CharacterRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+    name_context = f"The protagonist's name is {req.character_name}." if req.character_name else "The protagonist's name has not been decided yet."
+
+    prompt = f"""You are a character development expert trained in K.M. Weiland's Creating Character Arcs and David Corbett's The Art of Character.
+
+Framework: {framework_ctx}
+{name_context}
+
+Logline: "{req.logline}"
+Protagonist's wound: "{req.wound_answer}"
+
+{AVOID_LIST}
+
+Derive:
+1. THE LIE: The specific false belief this protagonist carries because of this wound. Must be unique to their wound — not a generic "I am unlovable" or "I don't deserve happiness."
+2. WANT vs NEED: Want = external conscious goal. Need = internal truth they resist. These must create genuine tension with each other.
+3. TWO SAVE THE CAT MOMENTS: Specific, visual, surprising. Option A = active (protagonist does something that reveals character). Option B = passive (something happens that reveals character).
+4. SECONDARY CHARACTER PROMPT: One question about who is most threatened by this protagonist changing — and why.
+
+Respond ONLY with valid JSON, no markdown:
+{{
+  "lie": "the specific false belief",
+  "want": "the external conscious goal",
+  "need": "the internal truth they resist",
+  "save_the_cat": [
+    {{"option": "A", "scene": "vivid 2-3 sentence scene description", "framing": "active"}},
+    {{"option": "B", "scene": "vivid 2-3 sentence scene description", "framing": "passive"}}
+  ],
+  "secondary_character_prompt": "specific question about who is threatened by this protagonist's change"
+}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return CharacterResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
+# ─── /beat ────────────────────────────────────────────────────────────────────
 
 @router.post("/beat", response_model=BeatResponse)
 async def generate_beat_question(req: BeatRequest):
@@ -152,34 +477,39 @@ async def generate_beat_question(req: BeatRequest):
         raise HTTPException(status_code=500, detail="AI not configured")
 
     client = anthropic.Anthropic(api_key=api_key)
-    beat_list = FILM_BEATS if req.format == "film" else SHORT_BEATS
+    beat_list = get_beats(req.format, req.framework)
     total = len(beat_list)
+    framework_ctx = get_framework_context(req.framework, req.format)
 
     completed_summary = ""
     if req.completed_beats:
         lines = [f"Beat {b['number']} ({b['name']}): {b['answer']}" for b in req.completed_beats]
         completed_summary = "\nBeats already completed:\n" + "\n".join(lines)
 
-    prompt = f"""You are a story structure expert trained in Blake Snyder's Save the Cat beat sheet ({total} beats for this format).
+    prompt = f"""You are a story structure expert working within this framework:
+{framework_ctx}
 
-The writer is working on beat {req.beat_number} of {total}: \"{req.beat_name}\"
+The writer is working on beat {req.beat_number} of {total}: "{req.beat_name}"
 
 Story context:
-- Logline: \"{req.logline}\"
-- The Lie the protagonist believes: \"{req.character_lie}\"
-- What they Want: \"{req.character_want}\"
-- What they Need: \"{req.character_need}\"{completed_summary}
+- Logline: "{req.logline}"
+- The Lie the protagonist believes: "{req.character_lie}"
+- What they Want: "{req.character_want}"
+- What they Need: "{req.character_need}"{completed_summary}
 
-Your job: ask the single most important question to help the writer discover what happens in THIS beat — specific to their story, not generic.
+{AVOID_LIST}
+
+Ask the single most important question to help the writer discover what happens in THIS beat — grounded in their specific story, not a generic beat description.
+The question should feel surprising and specific — it should be impossible to answer generically.
 
 Also give:
-- A one-sentence hint if they get stuck (nudge, not the answer)
-- A one-sentence emotional note about what the audience should FEEL at this beat
+- A one-sentence hint if they get stuck (a nudge toward specificity, not the answer)
+- A one-sentence emotional note about what the AUDIENCE should feel at this beat
 
 Respond ONLY with valid JSON, no markdown:
 {{
   "question": "the single specific question for this beat",
-  "hint": "one sentence nudge if stuck",
+  "hint": "one sentence nudge toward specificity",
   "emotional_note": "what the audience feels at this beat"
 }}"""
 
@@ -196,65 +526,5 @@ Respond ONLY with valid JSON, no markdown:
             if text.startswith("json"):
                 text = text[4:]
         return BeatResponse(**json.loads(text.strip()))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
-
-
-# ─── /character ───────────────────────────────────────────────────────────────
-
-@router.post("/character", response_model=CharacterResponse)
-async def generate_character(req: CharacterRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    format_context = (
-        "This is a FILM. Save the Cat moments should be visual and cinematic."
-        if req.format == "film"
-        else "This is a SHORT STORY. Save the Cat moments should be intimate and character-revealing."
-    )
-    name_context = f"The protagonist's name is {req.character_name}." if req.character_name else "The protagonist's name has not been decided yet."
-
-    prompt = f"""You are a character development expert trained in K.M. Weiland's Creating Character Arcs, David Corbett's The Art of Character, and Blake Snyder's Save the Cat.
-
-{format_context}
-{name_context}
-
-Logline: \"{req.logline}\"
-Protagonist's wound: \"{req.wound_answer}\"
-
-Derive:
-1. THE LIE: The false belief the protagonist carries because of this wound. One sentence.
-2. WANT vs NEED: Want = external conscious goal. Need = internal truth they must learn. These must tension each other.
-3. TWO SAVE THE CAT MOMENTS: Option A = active (protagonist does something), Option B = passive (something happens to them).
-4. SECONDARY CHARACTER PROMPT: One question about who resists the protagonist's change and why.
-
-Respond ONLY with valid JSON, no markdown:
-{{
-  "lie": "the single false belief",
-  "want": "the external conscious goal",
-  "need": "the internal truth they must learn",
-  "save_the_cat": [
-    {{"option": "A", "scene": "vivid 2-3 sentence scene description", "framing": "active"}},
-    {{"option": "B", "scene": "vivid 2-3 sentence scene description", "framing": "passive"}}
-  ],
-  "secondary_character_prompt": "specific question about who resists this protagonist's change"
-}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return CharacterResponse(**json.loads(text.strip()))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
