@@ -261,9 +261,13 @@ The story is set: "{req.location}"
 Framework: {framework_ctx}
 
 Generate 3 SPECIFIC broken relationship suggestions that existed BEFORE this story begins.
-Not a plot point — something that already happened. Something that left a mark.
-Each suggestion must feel specific to both the idea and the location. Avoid parent/child estrangement as default.
-Each suggestion: one sentence, under 20 words.
+Not a plot point — something that already happened and left a mark.
+Write them as plain story notes — direct and factual, not literary.
+Must feel specific to the idea and location. Avoid parent/child estrangement as default.
+Each suggestion: plain language, one sentence, under 20 words.
+
+Examples of the RIGHT tone: "a former partner she informed on, now released from prison", "a cousin who took the money and moved to Abuja"
+Examples of the WRONG tone: "She cut off her childhood best friend after discovering she'd been informing to local gang leaders for years" — too long and literary
 
 {AVOID_LIST}
 
@@ -277,9 +281,15 @@ Broken relationship before the story: "{req.broken_relationship}"
 Framework: {framework_ctx}
 
 Generate 3 SPECIFIC private behaviour suggestions — small things the protagonist does when no one is watching.
-This reveals who they truly are beneath the surface. Not dramatic. Small, human, specific.
-Must feel consistent with the setting and broken relationship provided.
-Each suggestion: one sentence, under 15 words.
+These must be written as plain, rough story notes — NOT polished prose, NOT literary sentences.
+Write them the way a writer would jot them down for themselves: direct, specific, grounded in the details provided.
+Not dramatic. Not poetic. Just specific and human.
+Must feel directly connected to the setting and broken relationship provided above.
+Avoid generic introspective behaviours like journaling, looking in mirrors, or crying alone.
+Each suggestion: plain language, under 15 words, starting with the action not the character.
+
+Examples of the RIGHT tone: "counts the exits in every room before sitting down", "keeps a second phone charged with no contacts"
+Examples of the WRONG tone: "She rehearses casual lies to the mirror, practicing her innocent face" — too literary
 
 {AVOID_LIST}
 
@@ -599,5 +609,148 @@ Respond ONLY with valid JSON, no markdown:
             if text.startswith("json"):
                 text = text[4:]
         return BeatSuggestionResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
+# ─── /character-field ────────────────────────────────────────────────────────
+
+class CharacterFieldRequest(BaseModel):
+    field: str  # "lie", "want", or "need"
+    logline: str
+    format: str
+    framework: str = "save_the_cat"
+    wound_answer: str
+    current_lie: str = ""
+    current_want: str = ""
+    current_need: str = ""
+
+class CharacterFieldResponse(BaseModel):
+    value: str
+
+@router.post("/character-field", response_model=CharacterFieldResponse)
+async def regenerate_character_field(req: CharacterFieldRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    field_instructions = {
+        "lie": "THE LIE: The specific false belief this protagonist carries because of their wound. Must be unique to their story — not generic like 'I am unlovable'. One sentence.",
+        "want": "WHAT THEY WANT: The external conscious goal the protagonist is chasing. Must create tension with their need. One sentence.",
+        "need": "WHAT THEY NEED: The internal truth the protagonist must learn. Must be different from and in tension with what they want. One sentence.",
+    }
+
+    existing = ""
+    if req.current_lie: existing += f"\nCurrent Lie: {req.current_lie}"
+    if req.current_want: existing += f"\nCurrent Want: {req.current_want}"
+    if req.current_need: existing += f"\nCurrent Need: {req.current_need}"
+
+    prompt = f"""You are a character development expert.
+
+Framework: {framework_ctx}
+Logline: "{req.logline}"
+Protagonist's wound: "{req.wound_answer}"
+{existing}
+
+{AVOID_LIST}
+
+Generate a NEW version of: {field_instructions.get(req.field, req.field)}
+Must be completely different from the current version shown above.
+Specific, surprising, grounded in this protagonist's wound and logline.
+
+Respond ONLY with valid JSON, no markdown:
+{{"value": "the new {req.field}"}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=256,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return CharacterFieldResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
+# ─── /save-the-cat-single ────────────────────────────────────────────────
+
+class SaveTheCatSingleRequest(BaseModel):
+    option: str  # "A" or "B"
+    framing: str  # "active" or "passive"
+    logline: str
+    format: str
+    framework: str = "save_the_cat"
+    wound_answer: str
+    lie: str
+    existing_scene: str = ""
+    other_scene: str = ""
+
+class SaveTheCatSingleResponse(BaseModel):
+    option: str
+    scene: str
+    framing: str
+
+@router.post("/save-the-cat-single", response_model=SaveTheCatSingleResponse)
+async def regenerate_save_the_cat(req: SaveTheCatSingleRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    framing_instruction = (
+        "ACTIVE: The protagonist does something that reveals their character — they initiate, choose, act."
+        if req.framing == "active"
+        else "PASSIVE: Something happens to the protagonist that reveals their character — they respond, react, endure."
+    )
+
+    avoid_existing = ""
+    if req.existing_scene: avoid_existing += f"\nDo NOT produce anything similar to this existing scene: {req.existing_scene}"
+    if req.other_scene: avoid_existing += f"\nAlso avoid similarity to: {req.other_scene}"
+
+    prompt = f"""You are a character development expert.
+
+Framework: {framework_ctx}
+Logline: "{req.logline}"
+Protagonist's wound: "{req.wound_answer}"
+The Lie they believe: "{req.lie}"
+{avoid_existing}
+
+{AVOID_LIST}
+
+Write ONE new Save the Cat scene for Option {req.option}.
+{framing_instruction}
+The scene must:
+- Be vivid, specific, 2-3 sentences
+- Make the audience root for this protagonist before anything goes wrong
+- Be grounded in THIS specific story's world and character
+- Feel completely different from any existing scene shown above
+
+Respond ONLY with valid JSON, no markdown:
+{{"option": "{req.option}", "scene": "the scene description", "framing": "{req.framing}"}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=384,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return SaveTheCatSingleResponse(**json.loads(text.strip()))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
