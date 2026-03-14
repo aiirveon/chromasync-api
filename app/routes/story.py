@@ -244,33 +244,41 @@ async def generate_interrogation_hints(req: InterrogationHintRequest):
     framework_ctx = get_framework_context(req.framework, req.format)
 
     if req.question_number == 1:
-        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+        idea_note = """NOTE: If the idea is a title or just a few words, treat it as the seed of the story — not literally.
+A title like 'The Wedding Party' does not mean the story is set at a wedding venue.
+Think about what kind of world, environment or institution would make THIS story surprising and specific."""
+        prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
 Framework: {framework_ctx}
+{idea_note}
 
 Generate 3 SPECIFIC, SURPRISING location suggestions for where this story could be set.
-NOT generic cities or countries. Think: a specific type of building, institution, neighbourhood, or environment.
-Each suggestion should feel like it adds texture and possibility to this specific idea.
+NOT generic expected settings for the title — subvert expectations.
+NOT generic cities or countries. Think: a specific type of building, institution, neighbourhood, environment.
+Each suggestion adds texture and unexpected possibility to this idea.
 Each suggestion: under 12 words. Vivid and concrete.
 
 {AVOID_LIST}
 
 Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["location 1", "location 2", "location 3"]}}"""  # noqa
+{{"suggestions": ["location 1", "location 2", "location 3"]}}"""
 
     elif req.question_number == 2:
-        ctx2 = f'Setting committed by writer: "{req.location}"' if req.location else ""
-        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+        ctx2 = ""
+        if req.location: ctx2 += f'\nSetting the writer chose: "{req.location}"'
+        if req.theme: ctx2 += f'\nTheme: "{req.theme}"'
+        prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
 {ctx2}
 Framework: {framework_ctx}
 
 Generate 3 SPECIFIC broken relationship suggestions that existed BEFORE this story begins.
 Not a plot point — something that already happened and left a mark.
 Write them as plain story notes — direct and factual, not literary.
-Must feel specific to the idea and location. Avoid parent/child estrangement as default.
+Must feel specific to the idea, title and any setting provided. Avoid parent/child estrangement as default.
+If the setting was provided, ground the relationship in that world specifically.
 Each suggestion: plain language, one sentence, under 20 words.
 
 Examples of the RIGHT tone: "a former partner she informed on, now released from prison", "a cousin who took the money and moved to Abuja"
-Examples of the WRONG tone: "She cut off her childhood best friend after discovering she'd been informing to local gang leaders for years" — too long and literary
+Examples of the WRONG tone: "She cut off her childhood best friend after discovering she'd been informing" — too literary
 
 {AVOID_LIST}
 
@@ -280,9 +288,9 @@ Respond ONLY with valid JSON, no markdown:
     else:
         ctx3 = ""
         if req.location: ctx3 += f'\nSetting: "{req.location}"'
-        if req.broken_relationship: ctx3 += f'\nBroken relationship: "{req.broken_relationship}"'
-        if req.theme: ctx3 += f'\nTheme/primal question: "{req.theme}"'
-        prompt = f"""A writer has this story idea: "{req.raw_idea}"
+        if req.broken_relationship: ctx3 += f'\nBroken relationship the writer committed: "{req.broken_relationship}"'
+        if req.theme: ctx3 += f'\nTheme: "{req.theme}"'
+        prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
 {ctx3}
 Framework: {framework_ctx}
 
@@ -407,15 +415,20 @@ async def generate_loglines(req: LoglineRequest):
     if req.private_behaviour:
         specificity += f"\nThe protagonist when no one is watching: {req.private_behaviour}"
 
+    title_note = "If the idea is a title or just a few words, do NOT treat it literally. A title like 'The Wedding Party' could be about any human conflict that touches on ceremony, obligation, performance, or gathering. Treat the title as a prompt to invent a specific story."
+
     prompt = f"""You are a story development expert working within this framework:
 {framework_ctx}
 
-A writer has this raw idea: "{req.raw_idea}"
+A writer has this raw idea or title: "{req.raw_idea}"
 {specificity}
+{title_note}
 
 {AVOID_LIST}
 
 Generate THREE logline versions, each emphasising a different angle.
+If specificity details are provided, use them to ground the loglines concretely.
+If only a title or short phrase was given, invent three different specific interpretations — each one a genuinely different story.
 Use the specificity details above — the setting, broken relationship, and behaviour — to make each logline concrete and grounded in THIS writer's world, not a generic version of their idea.
 
 Each logline must:
