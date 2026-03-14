@@ -319,6 +319,75 @@ Respond ONLY with valid JSON, no markdown:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
 
+# ─── /theme-suggestions ───────────────────────────────────────────────────────
+
+class ThemeSuggestionRequest(BaseModel):
+    raw_idea: str
+    format: str
+    framework: str = "save_the_cat"
+    location: str = ""
+    broken_relationship: str = ""
+    private_behaviour: str = ""
+    existing_loglines: list[str] = []
+    current_theme: str = ""
+
+class ThemeSuggestionResponse(BaseModel):
+    suggestions: list[str]
+
+@router.post("/theme-suggestions", response_model=ThemeSuggestionResponse)
+async def generate_theme_suggestions(req: ThemeSuggestionRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    story_ctx = f'Raw idea: "{req.raw_idea}"'
+    if req.location: story_ctx += f'\nSetting: "{req.location}"'
+    if req.broken_relationship: story_ctx += f'\nBroken relationship: "{req.broken_relationship}"'
+    if req.private_behaviour: story_ctx += f'\nPrivate behaviour: "{req.private_behaviour}"'
+    if req.existing_loglines: story_ctx += "\nLoglines: " + " / ".join(req.existing_loglines[:3])
+    avoid_current = f'\nDo NOT suggest anything similar to: "{req.current_theme}"' if req.current_theme else ""
+
+    prompt = f"""You are a story development expert.
+
+Framework: {framework_ctx}
+{story_ctx}
+{avoid_current}
+
+{AVOID_LIST}
+
+Generate 3 different primal questions -- the deeper moral or emotional truth beneath this story.
+Each question must:
+- Be specific to THIS story, not generic
+- Point toward the protagonist's wound and lie
+- Be the question the story is answering, not a plot question
+- One sentence, phrased as a genuine question
+
+Right tone: "Can a person protect someone they love by becoming exactly what they feared?"
+Wrong tone: "What is the meaning of love?" -- too generic
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["theme 1", "theme 2", "theme 3"]}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return ThemeSuggestionResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
 # ─── /logline ─────────────────────────────────────────────────────────────────
 
 @router.post("/logline", response_model=LoglineResponse)
