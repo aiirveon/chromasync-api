@@ -175,6 +175,8 @@ class InterrogationHintRequest(BaseModel):
     framework: str = "save_the_cat"
     location: str = ""
     broken_relationship: str = ""
+    private_behaviour: str = ""
+    theme: str = ""  # primal question if already set
 
 class InterrogationHintResponse(BaseModel):
     suggestions: list[str]
@@ -253,11 +255,12 @@ Each suggestion: under 12 words. Vivid and concrete.
 {AVOID_LIST}
 
 Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["location 1", "location 2", "location 3"]}}"""
+{{"suggestions": ["location 1", "location 2", "location 3"]}}"""  # noqa
 
     elif req.question_number == 2:
+        ctx2 = f'Setting committed by writer: "{req.location}"' if req.location else ""
         prompt = f"""A writer has this story idea: "{req.raw_idea}"
-The story is set: "{req.location}"
+{ctx2}
 Framework: {framework_ctx}
 
 Generate 3 SPECIFIC broken relationship suggestions that existed BEFORE this story begins.
@@ -275,9 +278,12 @@ Respond ONLY with valid JSON, no markdown:
 {{"suggestions": ["relationship 1", "relationship 2", "relationship 3"]}}"""
 
     else:
+        ctx3 = ""
+        if req.location: ctx3 += f'\nSetting: "{req.location}"'
+        if req.broken_relationship: ctx3 += f'\nBroken relationship: "{req.broken_relationship}"'
+        if req.theme: ctx3 += f'\nTheme/primal question: "{req.theme}"'
         prompt = f"""A writer has this story idea: "{req.raw_idea}"
-The story is set: "{req.location}"
-Broken relationship before the story: "{req.broken_relationship}"
+{ctx3}
 Framework: {framework_ctx}
 
 Generate 3 SPECIFIC private behaviour suggestions — small things the protagonist does when no one is watching.
@@ -613,6 +619,75 @@ Respond ONLY with valid JSON, no markdown:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
 
+# ─── /theme-suggestions ─────────────────────────────────────────────────────
+
+class ThemeSuggestionRequest(BaseModel):
+    raw_idea: str
+    format: str
+    framework: str = "save_the_cat"
+    location: str = ""
+    broken_relationship: str = ""
+    private_behaviour: str = ""
+    existing_loglines: list[str] = []
+    current_theme: str = ""
+
+class ThemeSuggestionResponse(BaseModel):
+    suggestions: list[str]
+
+@router.post("/theme-suggestions", response_model=ThemeSuggestionResponse)
+async def generate_theme_suggestions(req: ThemeSuggestionRequest):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI not configured")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    framework_ctx = get_framework_context(req.framework, req.format)
+
+    story_ctx = f'Raw idea: "{req.raw_idea}"'
+    if req.location: story_ctx += f'\nSetting: "{req.location}"'
+    if req.broken_relationship: story_ctx += f'\nBroken relationship: "{req.broken_relationship}"'
+    if req.private_behaviour: story_ctx += f'\nPrivate behaviour: "{req.private_behaviour}"'
+    if req.existing_loglines: story_ctx += "\nLoglines: " + " / ".join(req.existing_loglines[:3])
+    avoid_current = f'\nDo NOT suggest anything similar to the current theme: "{req.current_theme}"' if req.current_theme else ""
+
+    prompt = f"""You are a story development expert.
+
+Framework: {framework_ctx}
+{story_ctx}
+{avoid_current}
+
+{AVOID_LIST}
+
+Generate 3 DIFFERENT primal questions — the deeper moral or emotional truth beneath this story.
+Each question should:
+- Be specific to THIS story, not a generic "what does it mean to love"
+- Point toward the protagonist's wound and the lie they believe
+- Be a question the story itself is trying to answer, not a plot question
+- Be one sentence, phrased as a genuine question
+
+Examples of the RIGHT tone: "Can a person protect someone they love by becoming exactly what they feared?", "Is loyalty to family worth more than loyalty to truth?"
+Examples of the WRONG tone: "What is the meaning of love?" — too generic
+
+Respond ONLY with valid JSON, no markdown:
+{{"suggestions": ["theme 1", "theme 2", "theme 3"]}}"""
+
+    message = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    try:
+        text = message.content[0].text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return ThemeSuggestionResponse(**json.loads(text.strip()))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+
+
 # ─── /character-field ────────────────────────────────────────────────────────
 
 class CharacterFieldRequest(BaseModel):
@@ -621,6 +696,11 @@ class CharacterFieldRequest(BaseModel):
     format: str
     framework: str = "save_the_cat"
     wound_answer: str
+    character_name: str = ""
+    location: str = ""
+    broken_relationship: str = ""
+    private_behaviour: str = ""
+    theme: str = ""
     current_lie: str = ""
     current_want: str = ""
     current_need: str = ""
@@ -643,6 +723,12 @@ async def regenerate_character_field(req: CharacterFieldRequest):
         "need": "WHAT THEY NEED: The internal truth the protagonist must learn. Must be different from and in tension with what they want. One sentence.",
     }
 
+    story_ctx = ""
+    if req.character_name: story_ctx += f"\nProtagonist's name: {req.character_name}"
+    if req.location: story_ctx += f"\nSetting: {req.location}"
+    if req.broken_relationship: story_ctx += f"\nBroken relationship before story: {req.broken_relationship}"
+    if req.private_behaviour: story_ctx += f"\nPrivate behaviour: {req.private_behaviour}"
+    if req.theme: story_ctx += f"\nTheme: {req.theme}"
     existing = ""
     if req.current_lie: existing += f"\nCurrent Lie: {req.current_lie}"
     if req.current_want: existing += f"\nCurrent Want: {req.current_want}"
@@ -653,6 +739,7 @@ async def regenerate_character_field(req: CharacterFieldRequest):
 Framework: {framework_ctx}
 Logline: "{req.logline}"
 Protagonist's wound: "{req.wound_answer}"
+{story_ctx}
 {existing}
 
 {AVOID_LIST}
