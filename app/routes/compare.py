@@ -162,7 +162,7 @@ async def compare_live_frame(
 
     tonal_advice, tonal_status = advise_tonal_distribution(live_hist, ref_hist)
 
-    metrics = [
+    metrics_unordered = [
         {
             "id":        "white_balance",
             "label":     "White Balance",
@@ -234,6 +234,10 @@ async def compare_live_frame(
             "advice":    advise_picture_profile_flatness(live["contrast_ratio"], ref["contrast_ratio"]),
         },
     ]
+
+    # Reorder by importance: WB > Colour Cast > Exposure > Tonal Distribution > Saturation > Contrast > Picture Profile
+    order = ["white_balance", "channel_balance", "exposure", "tonal_distribution", "saturation", "contrast", "picture_profile"]
+    metrics = sorted(metrics_unordered, key=lambda m: order.index(m["id"]) if m["id"] in order else 99)
 
     overall = compute_overall_status(metrics)
     overall_label = {

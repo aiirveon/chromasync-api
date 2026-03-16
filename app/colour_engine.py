@@ -1,13 +1,41 @@
 import cv2
 import numpy as np
+from PIL import Image
+import io
+try:
+    import pillow_avif  # registers AVIF support with Pillow
+except ImportError:
+    pass
 
 
-def analyse_image(image_bytes: bytes) -> dict:
+def decode_image(image_bytes: bytes) -> np.ndarray:
+    """
+    Decode image bytes to BGR numpy array.
+    Falls back to Pillow for formats OpenCV can't handle (AVIF, HEIC, WebP edge cases).
+    """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
+    if img_bgr is not None:
+        return img_bgr
+
+    # Fallback: Pillow handles AVIF, HEIC, TIFF, and other formats
+    try:
+        pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img_rgb = np.array(pil_img)
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        return img_bgr
+    except Exception as e:
+        raise ValueError(
+            f"Could not decode image. Supported formats: JPEG, PNG, WebP, AVIF, TIFF. Error: {str(e)}"
+        )
+
+
+def analyse_image(image_bytes: bytes) -> dict:
+    img_bgr = decode_image(image_bytes)
+
     if img_bgr is None:
-        raise ValueError("Could not decode image")
+        raise ValueError("Could not decode image — unsupported format")
 
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
