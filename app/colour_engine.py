@@ -97,9 +97,20 @@ def compute_scene_drift(scene_bytes: bytes, reference_bytes: bytes) -> dict:
     scene_data = analyse_image(scene_bytes)
     ref_data = analyse_image(reference_bytes)
 
-    scene_vec = np.array([scene_data["mean_r"], scene_data["mean_g"], scene_data["mean_b"]])
-    ref_vec = np.array([ref_data["mean_r"], ref_data["mean_g"], ref_data["mean_b"]])
-    delta_e = calculate_delta_e(scene_vec, ref_vec)
+    # Compute Delta E in CIE Lab space — perceptually accurate.
+    # RGB Euclidean distance is NOT Delta E and produces misleading scores.
+    # Two similar images in RGB can score 100+ because RGB is not perceptually uniform.
+    # Lab space is designed so equal numerical distances = equal perceived colour differences.
+    scene_bgr = decode_image(scene_bytes)
+    ref_bgr = decode_image(reference_bytes)
+
+    scene_lab = cv2.cvtColor(scene_bgr, cv2.COLOR_BGR2Lab).astype(float)
+    ref_lab = cv2.cvtColor(ref_bgr, cv2.COLOR_BGR2Lab).astype(float)
+
+    mean_scene_lab = np.mean(scene_lab.reshape(-1, 3), axis=0)
+    mean_ref_lab = np.mean(ref_lab.reshape(-1, 3), axis=0)
+
+    delta_e = float(np.sqrt(np.sum((mean_scene_lab - mean_ref_lab) ** 2)))
 
     return {
         "delta_e": round(delta_e, 2),
