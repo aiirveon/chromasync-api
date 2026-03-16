@@ -6,6 +6,93 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
+# ─── Shared client — created once at module load, not per request ─────────────
+# Avoids recreating the Anthropic client on every API call.
+_client: anthropic.Anthropic | None = None
+
+def get_client() -> anthropic.Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="AI not configured")
+        _client = anthropic.Anthropic(api_key=api_key)
+    return _client
+
+
+# ─── Prompt caching helpers ───────────────────────────────────────────────────
+# The AVOID_LIST is injected into a cached system block on every call.
+# Anthropic caches it for 5 minutes — subsequent calls pay only 10% of the
+# normal input token cost for those tokens (90% saving).
+# The minimum cacheable block size is 1024 tokens — AVOID_LIST qualifies.
+
+def cached_system_block(extra: str = "") -> list:
+    """Return the system block with cache_control on the AVOID_LIST."""
+    content = AVOID_LIST
+    if extra:
+        content = extra + "\n\n" + AVOID_LIST
+    return [
+        {
+            "type": "text",
+            "text": content,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
+
+def call_claude(
+    user_prompt: str,
+    max_tokens: int,
+    system_extra: str = "",
+    use_thinking: bool = False,
+    thinking_budget: int = 8000,
+) -> str:
+    """
+    Central Claude call function.
+
+    Prompt caching: the AVOID_LIST is always in a cached system block.
+    Extended thinking: enabled only when use_thinking=True (character and beat
+    endpoints). Adds a thinking budget so Claude reasons before responding.
+    Returns the final text response as a string.
+    """
+    client = get_client()
+
+    kwargs = dict(
+        model="claude-opus-4-5",
+        max_tokens=max_tokens,
+        system=cached_system_block(system_extra),
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    if use_thinking:
+        # Extended thinking — Claude reasons silently before producing the
+        # response. The thinking tokens are charged but not returned to the user.
+        # Budget must be less than max_tokens.
+        kwargs["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": thinking_budget,
+        }
+        # When thinking is enabled, temperature must be 1 (API requirement)
+        kwargs["temperature"] = 1
+
+    message = client.messages.create(**kwargs)
+
+    # Extract text from response — skip thinking blocks if present
+    for block in message.content:
+        if block.type == "text":
+            return block.text.strip()
+
+    raise HTTPException(status_code=500, detail="No text response from AI")
+
+
+def parse_json_response(text: str) -> dict:
+    """Strip markdown fences and parse JSON response from Claude."""
+    if "```" in text:
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return json.loads(text.strip())
+
 # ─── Option 4: Negative constraints ──────────────────────────────────────────
 # Injected silently into every generation prompt.
 # Forces the model off its most common defaults.
@@ -235,94 +322,39 @@ class BeatSuggestionResponse(BaseModel):
 
 @router.post("/interrogation-hints", response_model=InterrogationHintResponse)
 async def generate_interrogation_hints(req: InterrogationHintRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
-
     framework_ctx = get_framework_context(req.framework, req.format)
-
     if req.question_number == 1:
-        idea_note = """NOTE: If the idea is a title or just a few words, treat it as the seed of the story — not literally.
-A title like 'The Wedding Party' does not mean the story is set at a wedding venue.
-Think about what kind of world, environment or institution would make THIS story surprising and specific."""
         prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
 Framework: {framework_ctx}
-{idea_note}
-
-Generate 3 SPECIFIC, SURPRISING location suggestions for where this story could be set.
-NOT generic expected settings for the title — subvert expectations.
-NOT generic cities or countries. Think: a specific type of building, institution, neighbourhood, environment.
-Each suggestion adds texture and unexpected possibility to this idea.
-Each suggestion: under 12 words. Vivid and concrete.
-
-{AVOID_LIST}
-
-Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["location 1", "location 2", "location 3"]}}"""
-
+If the idea is a title, treat it as a seed not literally. Think what world would make it surprising.
+Generate 3 SPECIFIC surprising location suggestions. Not generic cities. Specific buildings, institutions, environments. Under 12 words each.
+Respond ONLY with valid JSON: {{"suggestions": ["location 1", "location 2", "location 3"]}}"""
     elif req.question_number == 2:
         ctx2 = ""
-        if req.location: ctx2 += f'\nSetting the writer chose: "{req.location}"'
+        if req.location: ctx2 += f'\nSetting: "{req.location}"'
         if req.theme: ctx2 += f'\nTheme: "{req.theme}"'
-        prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
+        prompt = f"""Story idea: "{req.raw_idea}"
 {ctx2}
 Framework: {framework_ctx}
-
-Generate 3 SPECIFIC broken relationship suggestions that existed BEFORE this story begins.
-Not a plot point — something that already happened and left a mark.
-Write them as plain story notes — direct and factual, not literary.
-Must feel specific to the idea, title and any setting provided. Avoid parent/child estrangement as default.
-If the setting was provided, ground the relationship in that world specifically.
-Each suggestion: plain language, one sentence, under 20 words.
-
-Examples of the RIGHT tone: "a former partner she informed on, now released from prison", "a cousin who took the money and moved to Abuja"
-Examples of the WRONG tone: "She cut off her childhood best friend after discovering she'd been informing" — too literary
-
-{AVOID_LIST}
-
-Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["relationship 1", "relationship 2", "relationship 3"]}}"""
-
+Generate 3 SPECIFIC broken relationships that existed BEFORE the story begins. Plain story notes, direct and factual. One sentence each under 20 words. Grounded in the setting if provided.
+Right: "a former partner she informed on, now released from prison"
+Wrong: "She cut off her childhood best friend" — too literary
+Respond ONLY with valid JSON: {{"suggestions": ["relationship 1", "relationship 2", "relationship 3"]}}"""
     else:
         ctx3 = ""
         if req.location: ctx3 += f'\nSetting: "{req.location}"'
-        if req.broken_relationship: ctx3 += f'\nBroken relationship the writer committed: "{req.broken_relationship}"'
+        if req.broken_relationship: ctx3 += f'\nBroken relationship: "{req.broken_relationship}"'
         if req.theme: ctx3 += f'\nTheme: "{req.theme}"'
-        prompt = f"""A writer has this story idea or title: "{req.raw_idea}"
+        prompt = f"""Story idea: "{req.raw_idea}"
 {ctx3}
 Framework: {framework_ctx}
-
-Generate 3 SPECIFIC private behaviour suggestions — small things the protagonist does when no one is watching.
-These must be written as plain, rough story notes — NOT polished prose, NOT literary sentences.
-Write them the way a writer would jot them down for themselves: direct, specific, grounded in the details provided.
-Not dramatic. Not poetic. Just specific and human.
-Must feel directly connected to the setting and broken relationship provided above.
-Avoid generic introspective behaviours like journaling, looking in mirrors, or crying alone.
-Each suggestion: plain language, under 15 words, starting with the action not the character.
-
-Examples of the RIGHT tone: "counts the exits in every room before sitting down", "keeps a second phone charged with no contacts"
-Examples of the WRONG tone: "She rehearses casual lies to the mirror, practicing her innocent face" — too literary
-
-{AVOID_LIST}
-
-Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["behaviour 1", "behaviour 2", "behaviour 3"]}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+Generate 3 SPECIFIC private behaviours — small things protagonist does when no one watches. Plain rough notes, not polished prose. Under 15 words each, start with the action.
+Right: "counts the exits in every room before sitting down"
+Wrong: "She rehearses casual lies to the mirror" — too literary
+Respond ONLY with valid JSON: {{"suggestions": ["behaviour 1", "behaviour 2", "behaviour 3"]}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return InterrogationHintResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=512)
+        return InterrogationHintResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -400,69 +432,30 @@ Respond ONLY with valid JSON, no markdown:
 
 @router.post("/logline", response_model=LoglineResponse)
 async def generate_loglines(req: LoglineRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     specificity = ""
-    if req.location:
-        specificity += f"\nSetting: {req.location}"
-    if req.broken_relationship:
-        specificity += f"\nBroken relationship before the story: {req.broken_relationship}"
-    if req.private_behaviour:
-        specificity += f"\nThe protagonist when no one is watching: {req.private_behaviour}"
-
-    title_note = "If the idea is a title or just a few words, do NOT treat it literally. A title like 'The Wedding Party' could be about any human conflict that touches on ceremony, obligation, performance, or gathering. Treat the title as a prompt to invent a specific story."
-
+    if req.location: specificity += f"\nSetting: {req.location}"
+    if req.broken_relationship: specificity += f"\nBroken relationship: {req.broken_relationship}"
+    if req.private_behaviour: specificity += f"\nProtagonist privately: {req.private_behaviour}"
     prompt = f"""You are a story development expert working within this framework:
 {framework_ctx}
-
-A writer has this raw idea or title: "{req.raw_idea}"
+Raw idea: "{req.raw_idea}"
 {specificity}
-{title_note}
-
-{AVOID_LIST}
-
-Generate THREE logline versions, each emphasising a different angle.
-If specificity details are provided, use them to ground the loglines concretely.
-If only a title or short phrase was given, invent three different specific interpretations — each one a genuinely different story.
-Use the specificity details above — the setting, broken relationship, and behaviour — to make each logline concrete and grounded in THIS writer's world, not a generic version of their idea.
-
-Each logline must:
-- Contain an ironic or surprising premise
-- Name or strongly imply the protagonist
-- State a clear goal and clear stakes
-- Be one sentence, under 40 words
-- Feel like it could only be THIS story — not any story
-
-Then ask the single most important Primal Question — the deeper emotional truth beneath the idea.
-
-Respond ONLY with valid JSON, no markdown:
+If the idea is a title or short phrase, treat it as a seed not a literal brief. Invent a specific story from it.
+Generate THREE logline versions each emphasising a different angle. Each must be under 40 words, surprising, specific to THIS story.
+Then ask the single Primal Question — the deeper emotional truth beneath the idea.
+Respond ONLY with valid JSON:
 {{
   "versions": [
-    {{"label": "External Stakes", "logline": "logline focused on external plot tension", "angle": "one sentence on what this angle emphasises"}},
-    {{"label": "Internal Stakes", "logline": "logline focused on internal emotional journey", "angle": "one sentence on what this angle emphasises"}},
-    {{"label": "Tonal Shift", "logline": "logline reframing from unexpected angle", "angle": "one sentence on what this angle emphasises"}}
+    {{"label": "External Stakes", "logline": "...", "angle": "..."}},
+    {{"label": "Internal Stakes", "logline": "...", "angle": "..."}},
+    {{"label": "Tonal Shift", "logline": "...", "angle": "..."}}
   ],
-  "primal_question": "a single deep question specific to this story and its protagonist"
+  "primal_question": "..."
 }}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return LoglineResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=1024)
+        return LoglineResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -471,54 +464,23 @@ Respond ONLY with valid JSON, no markdown:
 
 @router.post("/logline-single", response_model=LoglineSingleResponse)
 async def regenerate_single_logline(req: LoglineSingleRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     specificity = ""
-    if req.location:
-        specificity += f"\nSetting: {req.location}"
-    if req.broken_relationship:
-        specificity += f"\nBroken relationship: {req.broken_relationship}"
-    if req.private_behaviour:
-        specificity += f"\nProtagonist privately: {req.private_behaviour}"
-
+    if req.location: specificity += f"\nSetting: {req.location}"
+    if req.broken_relationship: specificity += f"\nBroken relationship: {req.broken_relationship}"
+    if req.private_behaviour: specificity += f"\nProtagonist privately: {req.private_behaviour}"
     existing = ""
     if req.existing_loglines:
-        existing = "\nDo NOT produce anything similar to these existing versions:\n" + "\n".join(f"- {l}" for l in req.existing_loglines)
-
-    prompt = f"""You are a story development expert working within this framework:
+        existing = "\nDo NOT produce anything similar to:\n" + "\n".join(f"- {l}" for l in req.existing_loglines)
+    prompt = f"""You are a story development expert.
 {framework_ctx}
-
 Raw idea: "{req.raw_idea}"
-{specificity}
-{existing}
-
-{AVOID_LIST}
-
-Generate ONE new logline for the "{req.label}" angle.
-It must be completely different from any existing versions listed above.
-Under 40 words. Concrete, specific, surprising.
-
-Respond ONLY with valid JSON, no markdown:
-{{"label": "{req.label}", "logline": "the logline", "angle": "one sentence on what this emphasises"}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+{specificity}{existing}
+Generate ONE new logline for the "{req.label}" angle. Different from existing versions. Under 40 words.
+Respond ONLY with valid JSON: {{"label": "{req.label}", "logline": "...", "angle": "..."}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return LoglineSingleResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=512)
+        return LoglineSingleResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -527,55 +489,34 @@ Respond ONLY with valid JSON, no markdown:
 
 @router.post("/character", response_model=CharacterResponse)
 async def generate_character(req: CharacterRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    # Extended thinking enabled — character psychology derivation benefits from
+    # deeper reasoning. Claude thinks through the wound before deriving Lie/Want/Need.
     framework_ctx = get_framework_context(req.framework, req.format)
-    name_context = f"The protagonist's name is {req.character_name}." if req.character_name else "The protagonist's name has not been decided yet."
-
-    prompt = f"""You are a character development expert trained in K.M. Weiland's Creating Character Arcs and David Corbett's The Art of Character.
-
+    name_context = f"Protagonist: {req.character_name}." if req.character_name else ""
+    prompt = f"""You are a character development expert (K.M. Weiland, David Corbett).
 Framework: {framework_ctx}
 {name_context}
-
 Logline: "{req.logline}"
-Protagonist's wound: "{req.wound_answer}"
-
-{AVOID_LIST}
-
+Wound: "{req.wound_answer}"
 Derive:
-1. THE LIE: The specific false belief this protagonist carries because of this wound. Must be unique to their wound — not a generic "I am unlovable" or "I don't deserve happiness."
-2. WANT vs NEED: Want = external conscious goal. Need = internal truth they resist. These must create genuine tension with each other.
-3. TWO SAVE THE CAT MOMENTS: Specific, visual, surprising. Option A = active (protagonist does something that reveals character). Option B = passive (something happens that reveals character).
-4. SECONDARY CHARACTER PROMPT: One question about who is most threatened by this protagonist changing — and why.
-
-Respond ONLY with valid JSON, no markdown:
+1. THE LIE: Specific false belief from this wound. Not generic.
+2. WANT vs NEED: External goal vs internal truth. Must create genuine tension.
+3. TWO SAVE THE CAT MOMENTS: Option A active, Option B passive. Vivid, 2-3 sentences each.
+4. SECONDARY CHARACTER PROMPT: Who is most threatened by this protagonist changing?
+Respond ONLY with valid JSON:
 {{
-  "lie": "the specific false belief",
-  "want": "the external conscious goal",
-  "need": "the internal truth they resist",
+  "lie": "...",
+  "want": "...",
+  "need": "...",
   "save_the_cat": [
-    {{"option": "A", "scene": "vivid 2-3 sentence scene description", "framing": "active"}},
-    {{"option": "B", "scene": "vivid 2-3 sentence scene description", "framing": "passive"}}
+    {{"option": "A", "scene": "...", "framing": "active"}},
+    {{"option": "B", "scene": "...", "framing": "passive"}}
   ],
-  "secondary_character_prompt": "specific question about who is threatened by this protagonist's change"
+  "secondary_character_prompt": "..."
 }}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return CharacterResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=5000, use_thinking=True, thinking_budget=3000)
+        return CharacterResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -584,60 +525,28 @@ Respond ONLY with valid JSON, no markdown:
 
 @router.post("/beat", response_model=BeatResponse)
 async def generate_beat_question(req: BeatRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
+    # Extended thinking enabled — beat questions need to understand the full
+    # narrative arc before asking the right question for this specific beat.
     beat_list = get_beats(req.format, req.framework)
     total = len(beat_list)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     completed_summary = ""
     if req.completed_beats:
         lines = [f"Beat {b['number']} ({b['name']}): {b['answer']}" for b in req.completed_beats]
-        completed_summary = "\nBeats already completed:\n" + "\n".join(lines)
-
-    prompt = f"""You are a story structure expert working within this framework:
+        completed_summary = "\nCompleted beats:\n" + "\n".join(lines)
+    prompt = f"""You are a story structure expert.
 {framework_ctx}
-
-The writer is working on beat {req.beat_number} of {total}: "{req.beat_name}"
-
-Story context:
-- Logline: "{req.logline}"
-- The Lie the protagonist believes: "{req.character_lie}"
-- What they Want: "{req.character_want}"
-- What they Need: "{req.character_need}"{completed_summary}
-
-{AVOID_LIST}
-
-Ask the single most important question to help the writer discover what happens in THIS beat — grounded in their specific story, not a generic beat description.
-The question should feel surprising and specific — it should be impossible to answer generically.
-
-Also give:
-- A one-sentence hint if they get stuck (a nudge toward specificity, not the answer)
-- A one-sentence emotional note about what the AUDIENCE should feel at this beat
-
-Respond ONLY with valid JSON, no markdown:
-{{
-  "question": "the single specific question for this beat",
-  "hint": "one sentence nudge toward specificity",
-  "emotional_note": "what the audience feels at this beat"
-}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+Beat {req.beat_number} of {total}: "{req.beat_name}"
+Logline: "{req.logline}"
+Lie: "{req.character_lie}" | Want: "{req.character_want}" | Need: "{req.character_need}"
+{completed_summary}
+Ask the single most important question for THIS beat — impossible to answer generically.
+Also: a one-sentence hint and a one-sentence emotional note for the audience.
+Respond ONLY with valid JSON:
+{{"question": "...", "hint": "...", "emotional_note": "..."}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return BeatResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=3000, use_thinking=True, thinking_budget=2000)
+        return BeatResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -646,57 +555,24 @@ Respond ONLY with valid JSON, no markdown:
 
 @router.post("/beat-suggestion", response_model=BeatSuggestionResponse)
 async def generate_beat_suggestions(req: BeatSuggestionRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     beat_list = get_beats(req.format, req.framework)
     total = len(beat_list)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     completed_summary = ""
     if req.completed_beats:
         lines = [f"Beat {b['number']} ({b['name']}): {b['answer']}" for b in req.completed_beats]
-        completed_summary = "\nBeats already completed:\n" + "\n".join(lines)
-
-    prompt = f"""You are a story structure expert working within this framework:
+        completed_summary = "\nCompleted beats:\n" + "\n".join(lines)
+    prompt = f"""You are a story structure expert.
 {framework_ctx}
-
-The writer is working on beat {req.beat_number} of {total}: "{req.beat_name}"
-
-Story context:
-- Logline: "{req.logline}"
-- The Lie the protagonist believes: "{req.character_lie}"
-- What they Want: "{req.character_want}"
-- What they Need: "{req.character_need}"{completed_summary}
-
-{AVOID_LIST}
-
-Generate 3 SHORT, SPECIFIC beat answer suggestions for this beat.
-Each suggestion should be:
-- 1-2 sentences max — a concrete story moment, not a description
-- Grounded in THIS specific story's characters, setting, and stakes
-- Different from each other in approach or tone
-- Written as if the writer wrote it themselves — first draft energy, not polished
-- Specific enough to be surprising, not generic enough to fit any story
-
-Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["suggestion 1", "suggestion 2", "suggestion 3"]}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+Beat {req.beat_number} of {total}: "{req.beat_name}"
+Logline: "{req.logline}"
+Lie: "{req.character_lie}" | Want: "{req.character_want}" | Need: "{req.character_need}"
+{completed_summary}
+Generate 3 SHORT specific beat answer suggestions. Each 1-2 sentences, concrete story moment, different in tone, first-draft energy, specific to THIS story.
+Respond ONLY with valid JSON: {{"suggestions": ["...", "...", "..."]}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return BeatSuggestionResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=512)
+        return BeatSuggestionResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -718,54 +594,24 @@ class ThemeSuggestionResponse(BaseModel):
 
 @router.post("/theme-suggestions", response_model=ThemeSuggestionResponse)
 async def generate_theme_suggestions(req: ThemeSuggestionRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     story_ctx = f'Raw idea: "{req.raw_idea}"'
     if req.location: story_ctx += f'\nSetting: "{req.location}"'
     if req.broken_relationship: story_ctx += f'\nBroken relationship: "{req.broken_relationship}"'
     if req.private_behaviour: story_ctx += f'\nPrivate behaviour: "{req.private_behaviour}"'
     if req.existing_loglines: story_ctx += "\nLoglines: " + " / ".join(req.existing_loglines[:3])
-    avoid_current = f'\nDo NOT suggest anything similar to the current theme: "{req.current_theme}"' if req.current_theme else ""
-
+    avoid_current = f'\nDo NOT suggest anything similar to: "{req.current_theme}"' if req.current_theme else ""
     prompt = f"""You are a story development expert.
-
 Framework: {framework_ctx}
-{story_ctx}
-{avoid_current}
-
-{AVOID_LIST}
-
-Generate 3 DIFFERENT primal questions — the deeper moral or emotional truth beneath this story.
-Each question should:
-- Be specific to THIS story, not a generic "what does it mean to love"
-- Point toward the protagonist's wound and the lie they believe
-- Be a question the story itself is trying to answer, not a plot question
-- Be one sentence, phrased as a genuine question
-
-Examples of the RIGHT tone: "Can a person protect someone they love by becoming exactly what they feared?", "Is loyalty to family worth more than loyalty to truth?"
-Examples of the WRONG tone: "What is the meaning of love?" — too generic
-
-Respond ONLY with valid JSON, no markdown:
-{{"suggestions": ["theme 1", "theme 2", "theme 3"]}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+{story_ctx}{avoid_current}
+Generate 3 different primal questions — the deeper moral truth beneath this story.
+Each must be specific to THIS story, point to the protagonist's wound, one sentence.
+Right tone: "Can a person protect someone they love by becoming exactly what they feared?"
+Wrong: "What is the meaning of love?" — too generic
+Respond ONLY with valid JSON: {{"suggestions": ["theme 1", "theme 2", "theme 3"]}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return ThemeSuggestionResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=512)
+        return ThemeSuggestionResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -792,60 +638,32 @@ class CharacterFieldResponse(BaseModel):
 
 @router.post("/character-field", response_model=CharacterFieldResponse)
 async def regenerate_character_field(req: CharacterFieldRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     field_instructions = {
-        "lie": "THE LIE: The specific false belief this protagonist carries because of their wound. Must be unique to their story — not generic like 'I am unlovable'. One sentence.",
-        "want": "WHAT THEY WANT: The external conscious goal the protagonist is chasing. Must create tension with their need. One sentence.",
-        "need": "WHAT THEY NEED: The internal truth the protagonist must learn. Must be different from and in tension with what they want. One sentence.",
+        "lie": "THE LIE: Specific false belief from wound. Not generic. One sentence.",
+        "want": "WHAT THEY WANT: External goal. Must create tension with need. One sentence.",
+        "need": "WHAT THEY NEED: Internal truth they resist. Different from want. One sentence.",
     }
-
     story_ctx = ""
-    if req.character_name: story_ctx += f"\nProtagonist's name: {req.character_name}"
+    if req.character_name: story_ctx += f"\nProtagonist: {req.character_name}"
     if req.location: story_ctx += f"\nSetting: {req.location}"
-    if req.broken_relationship: story_ctx += f"\nBroken relationship before story: {req.broken_relationship}"
+    if req.broken_relationship: story_ctx += f"\nBroken relationship: {req.broken_relationship}"
     if req.private_behaviour: story_ctx += f"\nPrivate behaviour: {req.private_behaviour}"
     if req.theme: story_ctx += f"\nTheme: {req.theme}"
     existing = ""
     if req.current_lie: existing += f"\nCurrent Lie: {req.current_lie}"
     if req.current_want: existing += f"\nCurrent Want: {req.current_want}"
     if req.current_need: existing += f"\nCurrent Need: {req.current_need}"
-
     prompt = f"""You are a character development expert.
-
-Framework: {framework_ctx}
-Logline: "{req.logline}"
-Protagonist's wound: "{req.wound_answer}"
-{story_ctx}
-{existing}
-
-{AVOID_LIST}
-
+{framework_ctx}
+Logline: "{req.logline}" | Wound: "{req.wound_answer}"
+{story_ctx}{existing}
 Generate a NEW version of: {field_instructions.get(req.field, req.field)}
-Must be completely different from the current version shown above.
-Specific, surprising, grounded in this protagonist's wound and logline.
-
-Respond ONLY with valid JSON, no markdown:
-{{"value": "the new {req.field}"}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=256,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+Completely different from current version. Specific, grounded in this wound and logline.
+Respond ONLY with valid JSON: {{"value": "..."}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return CharacterFieldResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=256)
+        return CharacterFieldResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
 
@@ -870,56 +688,24 @@ class SaveTheCatSingleResponse(BaseModel):
 
 @router.post("/save-the-cat-single", response_model=SaveTheCatSingleResponse)
 async def regenerate_save_the_cat(req: SaveTheCatSingleRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="AI not configured")
-
-    client = anthropic.Anthropic(api_key=api_key)
     framework_ctx = get_framework_context(req.framework, req.format)
-
     framing_instruction = (
-        "ACTIVE: The protagonist does something that reveals their character — they initiate, choose, act."
+        "ACTIVE: protagonist initiates, chooses, acts."
         if req.framing == "active"
-        else "PASSIVE: Something happens to the protagonist that reveals their character — they respond, react, endure."
+        else "PASSIVE: something happens to protagonist that reveals character."
     )
-
     avoid_existing = ""
-    if req.existing_scene: avoid_existing += f"\nDo NOT produce anything similar to this existing scene: {req.existing_scene}"
-    if req.other_scene: avoid_existing += f"\nAlso avoid similarity to: {req.other_scene}"
-
+    if req.existing_scene: avoid_existing += f"\nNot similar to: {req.existing_scene}"
+    if req.other_scene: avoid_existing += f"\nNot similar to: {req.other_scene}"
     prompt = f"""You are a character development expert.
-
-Framework: {framework_ctx}
-Logline: "{req.logline}"
-Protagonist's wound: "{req.wound_answer}"
-The Lie they believe: "{req.lie}"
+{framework_ctx}
+Logline: "{req.logline}" | Wound: "{req.wound_answer}" | Lie: "{req.lie}"
 {avoid_existing}
-
-{AVOID_LIST}
-
-Write ONE new Save the Cat scene for Option {req.option}.
-{framing_instruction}
-The scene must:
-- Be vivid, specific, 2-3 sentences
-- Make the audience root for this protagonist before anything goes wrong
-- Be grounded in THIS specific story's world and character
-- Feel completely different from any existing scene shown above
-
-Respond ONLY with valid JSON, no markdown:
-{{"option": "{req.option}", "scene": "the scene description", "framing": "{req.framing}"}}"""
-
-    message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=384,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
+Write ONE Save the Cat scene for Option {req.option}. {framing_instruction}
+Vivid, specific, 2-3 sentences. Makes audience root for protagonist. Completely different from existing.
+Respond ONLY with valid JSON: {{"option": "{req.option}", "scene": "...", "framing": "{req.framing}"}}"""
     try:
-        text = message.content[0].text.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return SaveTheCatSingleResponse(**json.loads(text.strip()))
+        text = call_claude(prompt, max_tokens=384)
+        return SaveTheCatSingleResponse(**parse_json_response(text))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
