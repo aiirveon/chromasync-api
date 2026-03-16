@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.colour_engine import analyse_image, decode_image
+from app.colour_engine import analyse_image
 
 router = APIRouter()
 
@@ -77,8 +77,12 @@ async def compute_drift(
         raise HTTPException(status_code=400, detail="Files too large. Maximum 50MB per image.")
 
     try:
-        scene_bgr = decode_image(scene_bytes)
-        ref_bgr = decode_image(reference_bytes)
+        scene_arr = np.frombuffer(scene_bytes, np.uint8)
+        scene_bgr = cv2.imdecode(scene_arr, cv2.IMREAD_COLOR)
+        ref_arr = np.frombuffer(reference_bytes, np.uint8)
+        ref_bgr = cv2.imdecode(ref_arr, cv2.IMREAD_COLOR)
+        if scene_bgr is None or ref_bgr is None:
+            raise ValueError("Could not decode one or both images. Supported formats: JPEG, PNG, WebP.")
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
