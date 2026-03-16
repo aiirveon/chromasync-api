@@ -8,3 +8,6 @@ venv/
 dist/
 build/
 .pytest_cache/
+# Model files generated at runtime
+app/models/colour_correction_model.pkl
+app/models/model_metadata.json
