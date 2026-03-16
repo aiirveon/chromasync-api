@@ -33,9 +33,9 @@ async def analyse_footage(
 
         delta_e = drift["delta_e"]
 
-        if delta_e < 2.0:
+        if delta_e < 5.0:
             status = "Accepted"
-        elif delta_e < 5.0:
+        elif delta_e < 15.0:
             status = "Corrected"
         else:
             status = "Needs Review"
