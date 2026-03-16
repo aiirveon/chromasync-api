@@ -78,6 +78,9 @@ def predict_correction(scene_profile: dict, reference_profile: dict) -> dict:
     delta_ev = scene_profile["exposure_ev"] - reference_profile["exposure_ev"]
     delta_sat = scene_profile["saturation_pct"] - reference_profile["saturation_pct"]
 
+    # Feature vector matches training schema exactly.
+    # Delta features excluded deliberately — same reason as training:
+    # they contain the answer mathematically and prevent genuine learning.
     features = np.array([[
         # Scene features
         scene_profile["mean_r"],
@@ -95,13 +98,6 @@ def predict_correction(scene_profile: dict, reference_profile: dict) -> dict:
         reference_profile["exposure_ev"],
         reference_profile["saturation_pct"],
         reference_profile["contrast_ratio"],
-        # Delta features
-        delta_r,
-        delta_g,
-        delta_b,
-        delta_temp,
-        delta_ev,
-        delta_sat,
     ]])
 
     prediction = _model.predict(features)[0]

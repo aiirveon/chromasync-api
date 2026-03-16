@@ -35,7 +35,7 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 # ── Synthetic data generation ─────────────────────────────────────────────────
 
 RANDOM_SEED = 42
-N_SAMPLES = 6000
+N_SAMPLES = 8000
 
 np.random.seed(RANDOM_SEED)
 
@@ -66,38 +66,78 @@ def generate_reference_profiles(n: int) -> pd.DataFrame:
 def apply_drift(ref: pd.DataFrame) -> tuple:
     """
     Apply simulated camera drift to the reference profiles.
-    Returns drifted scene profiles and the ground truth corrections needed.
-
-    Drift types modelled:
-    - White balance shift (colour temperature change)
-    - Exposure drift (ISO creep, aperture change, ND removal)
-    - Saturation shift (picture profile change)
-    - Channel-specific colour cast (mixed lighting, lens flare)
+    Includes realistic non-linearities:
+    - Sensor clipping at highlights and shadows
+    - LOG profile compression (non-linear tone mapping)
+    - Mixed lighting (two light sources at different temperatures)
+    - Lens flare and colour cast interactions
+    - Human error in manual white balance setting
+    These non-linearities mean correction is NOT a simple linear function
+    of the inputs, forcing the model to learn real patterns.
     """
     n = len(ref)
 
-    # Drift magnitudes
-    temp_drift = np.random.normal(0, 600, n)           # Kelvin drift
-    exposure_drift = np.random.normal(0, 0.6, n)       # EV drift
-    sat_drift = np.random.normal(0, 8, n)              # % saturation drift
-    r_cast = np.random.normal(0, 12, n)                # RGB channel cast
-    g_cast = np.random.normal(0, 8, n)
-    b_cast = np.random.normal(0, 12, n)
+    # Scene type: 0=standard, 1=mixed lighting, 2=LOG profile, 3=harsh clipping
+    scene_type = np.random.choice([0, 1, 2, 3], n, p=[0.5, 0.2, 0.2, 0.1])
 
-    # Apply drift to reference
+    # Base drift magnitudes
+    temp_drift = np.random.normal(0, 700, n)
+    exposure_drift = np.random.normal(0, 0.7, n)
+    sat_drift = np.random.normal(0, 10, n)
+    r_cast = np.random.normal(0, 15, n)
+    g_cast = np.random.normal(0, 10, n)
+    b_cast = np.random.normal(0, 15, n)
+
+    # Mixed lighting: secondary light source pulls colour temperature non-linearly
+    mixed_temp_pull = np.where(
+        scene_type == 1,
+        np.random.uniform(300, 1200, n) * np.random.choice([-1, 1], n),
+        0
+    )
+    mixed_r_cast = np.where(scene_type == 1, np.random.normal(0, 20, n), 0)
+    mixed_b_cast = np.where(scene_type == 1, np.random.normal(0, 20, n), 0)
+
+    # LOG profile: compressed highlights and shadows (non-linear)
+    log_factor = np.where(scene_type == 2, np.random.uniform(0.6, 0.85, n), 1.0)
+    log_midpoint_shift = np.where(scene_type == 2, np.random.normal(10, 5, n), 0)
+
+    # Harsh clipping: highlights blown, shadows crushed
+    clip_exposure = np.where(scene_type == 3, np.random.uniform(0.8, 1.5, n), 0)
+
+    # Build scene RGB with non-linear effects
+    raw_r = ref["ref_mean_r"] + r_cast + mixed_r_cast + temp_drift * (-0.009)
+    raw_g = ref["ref_mean_g"] + g_cast
+    raw_b = ref["ref_mean_b"] + b_cast + mixed_b_cast + (temp_drift + mixed_temp_pull) * 0.013
+
+    # Apply LOG compression non-linearly
+    raw_r = raw_r * log_factor + log_midpoint_shift
+    raw_g = raw_g * log_factor + log_midpoint_shift
+    raw_b = raw_b * log_factor + log_midpoint_shift
+
+    # Apply clipping (harsh scene type)
+    raw_r = np.where(raw_r > 220, 220 + (raw_r - 220) * 0.3, raw_r) + clip_exposure * 10
+    raw_b = np.where(raw_b > 220, 220 + (raw_b - 220) * 0.3, raw_b) + clip_exposure * 8
+
     scene = pd.DataFrame({
-        "scene_mean_r": np.clip(ref["ref_mean_r"] + r_cast + temp_drift * (-0.008), 0, 255),
-        "scene_mean_g": np.clip(ref["ref_mean_g"] + g_cast, 0, 255),
-        "scene_mean_b": np.clip(ref["ref_mean_b"] + b_cast + temp_drift * 0.012, 0, 255),
-        "scene_colour_temp_k": np.clip(ref["ref_colour_temp_k"] + temp_drift, 2000, 10000),
-        "scene_exposure_ev": ref["ref_exposure_ev"] + exposure_drift,
-        "scene_saturation_pct": np.clip(ref["ref_saturation_pct"] + sat_drift, 0, 100),
+        "scene_mean_r": np.clip(raw_r, 0, 255),
+        "scene_mean_g": np.clip(raw_g, 0, 255),
+        "scene_mean_b": np.clip(raw_b, 0, 255),
+        "scene_colour_temp_k": np.clip(
+            ref["ref_colour_temp_k"] + temp_drift + mixed_temp_pull, 2000, 10000
+        ),
+        "scene_exposure_ev": ref["ref_exposure_ev"] + exposure_drift + clip_exposure * 0.3,
+        "scene_saturation_pct": np.clip(
+            ref["ref_saturation_pct"] * log_factor + sat_drift, 0, 100
+        ),
         "scene_contrast_ratio": np.clip(
-            ref["ref_contrast_ratio"] + np.random.normal(0, 0.06, n), 0.05, 0.9
+            ref["ref_contrast_ratio"] * log_factor + np.random.normal(0, 0.07, n), 0.05, 0.9
         ),
     })
 
-    # Ground truth corrections: what needs to be applied to scene to match reference
+    # Ground truth corrections
+    # Note: because of non-linear effects (LOG, clipping, mixed lighting),
+    # these corrections are NOT a simple delta. The model must learn the
+    # non-linear mapping from scene+reference profiles to correction values.
     corrections = pd.DataFrame({
         "correct_r": ref["ref_mean_r"] - scene["scene_mean_r"],
         "correct_g": ref["ref_mean_g"] - scene["scene_mean_g"],
@@ -110,10 +150,11 @@ def apply_drift(ref: pd.DataFrame) -> tuple:
     return scene, corrections
 
 
-def add_noise(df: pd.DataFrame, noise_factor: float = 0.03) -> pd.DataFrame:
+def add_noise(df: pd.DataFrame, noise_factor: float = 0.06) -> pd.DataFrame:
     """
     Add realistic sensor noise and measurement uncertainty.
-    3% noise by default mirrors real camera sensor variation.
+    6% noise mirrors real camera sensor variation and measurement error.
+    Higher than initial 3% to prevent the model from fitting noise artifacts.
     """
     noisy = df.copy()
     for col in df.columns:
@@ -128,18 +169,14 @@ print("Generating synthetic training data...")
 reference_profiles = generate_reference_profiles(N_SAMPLES)
 scene_profiles, corrections = apply_drift(reference_profiles)
 
-# Features: scene statistics + reference statistics (delta context)
+# Features: scene statistics + reference statistics only.
+# Delta features are deliberately excluded — they mathematically contain
+# the correction answer and would cause the model to learn a trivial
+# identity function (R²≈0.99 from arithmetic, not real learning).
+# The model must learn correction patterns from raw colour profiles.
 features = pd.concat([
     scene_profiles,
     reference_profiles,
-    pd.DataFrame({
-        "delta_r": scene_profiles["scene_mean_r"] - reference_profiles["ref_mean_r"],
-        "delta_g": scene_profiles["scene_mean_g"] - reference_profiles["ref_mean_g"],
-        "delta_b": scene_profiles["scene_mean_b"] - reference_profiles["ref_mean_b"],
-        "delta_temp_k": scene_profiles["scene_colour_temp_k"] - reference_profiles["ref_colour_temp_k"],
-        "delta_exposure_ev": scene_profiles["scene_exposure_ev"] - reference_profiles["ref_exposure_ev"],
-        "delta_saturation": scene_profiles["scene_saturation_pct"] - reference_profiles["ref_saturation_pct"],
-    })
 ], axis=1)
 
 features = add_noise(features)
