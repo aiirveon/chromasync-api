@@ -4,7 +4,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from app.routes import pre_shoot, on_shoot, post_correction, vision, compare, story, drift
+from app.routes import pre_shoot, on_shoot, post_correction, vision, compare, story, drift, lut
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "app", "models", "colour_correction_model.pkl")
 
@@ -47,6 +47,7 @@ app.include_router(post_correction.router, prefix="/api/post-correction", tags=[
 app.include_router(vision.router, prefix="/api/vision", tags=["Vision AI"])
 app.include_router(story.router, prefix="/api/story", tags=["Story"])
 app.include_router(drift.router, prefix="/api/colour", tags=["Colour"])
+app.include_router(lut.router, prefix="/api/colour", tags=["Colour"])
 
 @app.get("/")
 def root():
