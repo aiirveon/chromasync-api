@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from typing import List
 from app.colour_engine import analyse_image, compute_scene_drift
+from app.models.predictor import predict_correction, model_available
 
 router = APIRouter()
 
@@ -39,6 +40,12 @@ async def analyse_footage(
         else:
             status = "Needs Review"
 
+        # ML model prediction for correction values
+        correction = predict_correction(
+            drift["scene_profile"],
+            drift["reference_profile"]
+        )
+
         exp = drift["scene_profile"]["exposure_ev"]
         results.append({
             "scene_number": i + 1,
@@ -50,6 +57,15 @@ async def analyse_footage(
             "temp_delta": drift["temp_delta"],
             "exposure_delta": drift["exposure_delta"],
             "saturation_delta": drift["saturation_delta"],
+            "ml_correction": {
+                "correct_r": correction.get("correct_r"),
+                "correct_g": correction.get("correct_g"),
+                "correct_b": correction.get("correct_b"),
+                "correct_exposure_ev": correction.get("correct_exposure_ev"),
+                "correct_temp_k": correction.get("correct_temp_k"),
+                "correct_saturation": correction.get("correct_saturation"),
+                "source": correction.get("source"),
+            },
         })
 
     avg_delta_e = sum(r["delta_e"] for r in results) / len(results)
@@ -67,5 +83,6 @@ async def analyse_footage(
             "needs_review_count": needs_review,
             "reference_temp": f"{ref_profile['colour_temperature_k']}K",
             "reference_exposure": f"{'+' if ref_exp >= 0 else ''}{ref_exp} EV",
+            "correction_source": "xgboost_model" if model_available() else "fallback_delta",
         },
     }

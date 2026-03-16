@@ -1,0 +1,65 @@
+{
+  "model_type": "MultiOutputRegressor(XGBRegressor)",
+  "n_samples_train": 4800,
+  "n_samples_test": 1200,
+  "feature_names": [
+    "scene_mean_r",
+    "scene_mean_g",
+    "scene_mean_b",
+    "scene_colour_temp_k",
+    "scene_exposure_ev",
+    "scene_saturation_pct",
+    "scene_contrast_ratio",
+    "ref_mean_r",
+    "ref_mean_g",
+    "ref_mean_b",
+    "ref_colour_temp_k",
+    "ref_exposure_ev",
+    "ref_saturation_pct",
+    "ref_contrast_ratio",
+    "delta_r",
+    "delta_g",
+    "delta_b",
+    "delta_temp_k",
+    "delta_exposure_ev",
+    "delta_saturation"
+  ],
+  "target_names": [
+    "correct_r",
+    "correct_g",
+    "correct_b",
+    "correct_exposure_ev",
+    "correct_temp_k",
+    "correct_saturation"
+  ],
+  "overall_mae": 3.6575,
+  "overall_r2": 0.9981,
+  "per_target_metrics": {
+    "correct_r": {
+      "mae": 0.4282,
+      "r2": 0.9978
+    },
+    "correct_g": {
+      "mae": 0.212,
+      "r2": 0.9988
+    },
+    "correct_b": {
+      "mae": 0.4781,
+      "r2": 0.9973
+    },
+    "correct_exposure_ev": {
+      "mae": 0.0171,
+      "r2": 0.9985
+    },
+    "correct_temp_k": {
+      "mae": 20.5793,
+      "r2": 0.9976
+    },
+    "correct_saturation": {
+      "mae": 0.2301,
+      "r2": 0.9984
+    }
+  },
+  "noise_factor": 0.03,
+  "random_seed": 42
+}

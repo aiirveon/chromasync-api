@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from app.colour_engine import analyse_image
 from app.recommendations import recommend_camera_settings
+from app.models.predictor import model_available, get_metadata
 
 router = APIRouter()
 
@@ -10,6 +11,7 @@ async def analyse_reference_frame(file: UploadFile = File(...)):
     """
     Upload a reference frame image.
     Returns colour profile analysis and recommended camera settings.
+    This endpoint sets the reference profile used for on-shoot comparison.
     """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
@@ -37,4 +39,8 @@ async def analyse_reference_frame(file: UploadFile = File(...)):
         },
         "camera_settings": settings,
         "histogram": profile["histogram"],
+        "model_status": {
+            "correction_model_loaded": model_available(),
+            "model_info": get_metadata() or "Model not loaded. Run train_model.py to train.",
+        },
     }
